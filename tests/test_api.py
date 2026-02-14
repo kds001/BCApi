@@ -12,8 +12,8 @@ Base.metadata.create_all(bind=engine)
 
 
 def override_get_db():
-    db = TestingSessionLocal()
     try:
+        db = TestingSessionLocal()
         yield db
     finally:
         db.close()
@@ -27,81 +27,53 @@ def teardown_module():
     Base.metadata.drop_all(bind=engine)
 
 
-_firm_counter = 0
+def test_health_check():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
 
 
-def _create_firm_and_key() -> str:
-    global _firm_counter
-    _firm_counter += 1
-    response = client.post(
+def test_firm_creation_and_submit_record_flow():
+    create_firm = client.post(
         "/api/v1/encuestadoras",
-        json={"name": f"BC Integrador {_firm_counter}", "contact_email": f"api{_firm_counter}@bcintegrador.com"},
+        json={"name": "BC Data Lab", "contact_email": "ops@bcdatalab.com"},
     )
-    assert response.status_code == 201
-    return response.json()["api_key"]
+    assert create_firm.status_code == 201
+    api_key = create_firm.json()["api_key"]
 
-
-def test_respuesta_schema_compatible_with_nanoencuesta():
-    api_key = _create_firm_and_key()
-
-    payload = {
-        "edad": 30,
-        "provincia": "Madrid",
-        "ccaa": "Comunidad de Madrid",
-        "nacionalidad": "Española",
-        "voto_generales": "PP",
-        "voto_autonomicas": "PP",
-        "voto_municipales": "PP",
-        "voto_europeas": "PP",
-        "nota_ejecutivo": 6,
-        "val_feijoo": 7,
-        "val_sanchez": 4,
-        "val_abascal": 3,
-        "val_alvise": 2,
-        "val_yolanda_diaz": 5,
-        "val_irene_montero": 2,
-        "val_ayuso": 8,
-        "val_buxade": 2,
-        "posicion_ideologica": 7,
-        "voto_asociacion_juvenil": "Asociación X",
-        "monarquia_republica": "Monarquía Parlamentaria",
-        "division_territorial": "Sistema actual de Autonomías",
-        "sistema_pensiones": "Mixto",
-    }
-
-    response = client.post("/api/v1/respuestas", headers={"X-API-Key": api_key}, json=payload)
-    assert response.status_code == 201
-    data = response.json()
-    assert data["voto_generales"] == "PP"
-    assert data["encuestadora_id"] > 0
-
-
-def test_lider_preferido_and_summary_endpoints():
-    api_key = _create_firm_and_key()
-
-    leader = client.post(
-        "/api/v1/lideres-preferidos",
+    post_record = client.post(
+        "/api/v1/registros",
         headers={"X-API-Key": api_key},
-        json={"partido": "PSOE", "lider_preferido": "Pedro Sánchez", "es_personalizado": False},
+        json={
+            "respondent_id": "RESP-001",
+            "municipality": "Mexicali",
+            "age": 35,
+            "gender": "F",
+            "preferred_candidate": "Candidata A",
+            "approval_score": 72.5,
+        },
     )
-    assert leader.status_code == 201
+    assert post_record.status_code == 201
+    assert post_record.json()["survey_name"] == "#LaEncuestaBC"
 
     summary = client.get("/api/v1/resumen")
     assert summary.status_code == 200
-    assert "total_respuestas" in summary.json()
+    payload = summary.json()
+    assert payload["total_records"] >= 1
+    assert payload["candidate_distribution"]["Candidata A"] >= 1
 
 
-def test_cooldown_flow():
-    ip = "203.0.113.15"
-
-    initial = client.get(f"/api/v1/cooldown?ip_address={ip}")
-    assert initial.status_code == 200
-    assert initial.json()["can_vote"] is True
-
-    record = client.post("/api/v1/cooldown/record", json={"ip_address": ip})
-    assert record.status_code == 200
-    assert record.json()["remaining_minutes"] == 30
-
-    after = client.get(f"/api/v1/cooldown?ip_address={ip}")
-    assert after.status_code == 200
-    assert after.json()["can_vote"] is False
+def test_invalid_api_key_is_rejected():
+    response = client.post(
+        "/api/v1/registros",
+        headers={"X-API-Key": "invalida"},
+        json={
+            "respondent_id": "RESP-002",
+            "municipality": "Tijuana",
+            "age": 29,
+            "gender": "M",
+            "preferred_candidate": "Candidato B",
+            "approval_score": 55.0,
+        },
+    )
+    assert response.status_code == 401
